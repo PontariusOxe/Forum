@@ -1,0 +1,134 @@
+:root {
+    color-scheme: light;
+    font-family: "Segoe UI", Arial, sans-serif;
+    color: #26352a;
+    background: #f4f6f0;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+}
+
+.site-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem max(1rem, calc((100% - 850px) / 2));
+    color: #fff;
+    background: #315d3b;
+}
+
+.brand {
+    color: #fff;
+    font-size: 1.4rem;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+main {
+    width: min(850px, calc(100% - 2rem));
+    margin: 2rem auto;
+}
+
+h1,
+h2 {
+    color: #254a30;
+}
+
+.intro {
+    color: #526456;
+}
+
+.panel,
+.post {
+    margin: 1rem 0;
+    padding: 1.25rem;
+    border: 1px solid #dce4d9;
+    border-radius: 10px;
+    background: #fff;
+}
+
+label {
+    display: block;
+    margin: 0.8rem 0 0.35rem;
+    font-weight: 600;
+}
+
+input,
+textarea {
+    width: 100%;
+    padding: 0.7rem;
+    border: 1px solid #b8c7b8;
+    border-radius: 6px;
+    font: inherit;
+}
+
+textarea {
+    min-height: 110px;
+    resize: vertical;
+}
+
+button,
+.button {
+    display: inline-block;
+    margin: 0.9rem 0.5rem 0.2rem 0;
+    padding: 0.65rem 1rem;
+    border: 0;
+    border-radius: 6px;
+    color: #fff;
+    background: #315d3b;
+    font: inherit;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.secondary {
+    color: #315d3b;
+    background: #e5eee4;
+}
+
+.post-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    color: #526456;
+}
+
+.post p {
+    margin-bottom: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.empty {
+    padding: 1rem 0;
+    color: #526456;
+}
+
+.error {
+    padding: 0.8rem;
+    border-radius: 6px;
+    color: #762e2e;
+    background: #fce9e7;
+}
+
+a {
+    color: #315d3b;
+}
+
+@media (max-width: 550px) {
+    .site-header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.2rem;
+    }
+
+    .post-meta {
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+}
