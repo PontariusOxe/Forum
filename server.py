@@ -351,8 +351,10 @@ class ForumHandler(BaseHTTPRequestHandler):
         if posts:
             post_html = "".join(
                 f"""<article class="post">
-                    <div class="post-meta"><strong>{escape(post["username"])}</strong>
-                    <time>{escape(post["created_at"])}</time></div>
+                    <div class="post-meta">
+                        <span class="post-author">Skrivet av <strong>{escape(post["username"])}</strong></span>
+                        <time>{escape(post["created_at"])}</time>
+                    </div>
                     <p>{escape(post["body"])}</p>
                 </article>"""
                 for post in posts

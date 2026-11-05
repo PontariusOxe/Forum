@@ -98,6 +98,10 @@ button,
     color: #526456;
 }
 
+.post-author strong {
+    color: #254a30;
+}
+
 .post p {
     margin-bottom: 0;
     white-space: pre-wrap;
