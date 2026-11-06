@@ -13,47 +13,136 @@ from urllib.parse import parse_qs
 from html import escape
 
 
-DB_PATH = Path(__file__).with_name("forum.db")
+# Set these values to match your XAMPP MySQL/MariaDB settings.
+DB_BACKEND = os.environ.get("FORUM_DB_BACKEND", "mysql").lower()
+DB_HOST = "localhost"  # Enter the MySQL host shown in your XAMPP settings.
+DB_PORT = 3306  # Enter the MySQL port shown in your XAMPP settings.
+DB_USER = "root"  # Enter the MySQL username you want the forum to use.
+DB_PASSWORD = ""  # Enter that MySQL user's password; XAMPP may use a blank password.
+DB_NAME = "farforum"  # Create this database in phpMyAdmin before starting the forum.
 PASSWORD_ITERATIONS = 310_000
 SESSION_LIFETIME = 60 * 60 * 24 * 7
 MAX_REQUEST_SIZE = 12_000
 
 
+class DatabaseConnection:
+    def __init__(self, connection, backend, integrity_error=None):
+        self.connection = connection
+        self.backend = backend
+        self.integrity_error = integrity_error
+
+    def execute(self, query, parameters=()):
+        if self.backend == "sqlite":
+            return self.connection.execute(query, parameters)
+
+        cursor = self.connection.cursor(dictionary=True)
+        try:
+            cursor.execute(query.replace("?", "%s"), parameters)
+        except self.integrity_error as error:
+            cursor.close()
+            raise sqlite3.IntegrityError(str(error)) from error
+        return cursor
+
+    def commit(self):
+        self.connection.commit()
+
+    def close(self):
+        self.connection.close()
+
+
 def connect_db(database_path=None):
-    if database_path is None:
-        database_path = DB_PATH
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+    if database_path is not None or DB_BACKEND == "sqlite":
+        connection = sqlite3.connect(database_path or DB_PATH)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return DatabaseConnection(connection, "sqlite")
+
+    if DB_BACKEND != "mysql":
+        raise ValueError(
+            "FORUM_DB_BACKEND must be either 'mysql' or 'sqlite'."
+        )
+
+    try:
+        import mysql.connector
+        from mysql.connector.errors import IntegrityError
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "MySQL support is missing. Install dependencies with "
+            "'python -m pip install -r requirements.txt'."
+        ) from error
+
+    connection = mysql.connector.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        charset="utf8mb4",
+    )
+    return DatabaseConnection(connection, "mysql", IntegrityError)
 
 
 def init_db(database_path=None):
     with closing(connect_db(database_path)) as db:
-        db.executescript(
-            """
+        if db.backend == "sqlite":
+            schema = [
+                """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
+            )
+                """,
+                """
             CREATE TABLE IF NOT EXISTS posts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 body TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
-
+            )
+                """,
+                """
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
                 csrf_token TEXT NOT NULL,
                 user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 expires_at INTEGER NOT NULL
-            );
-            """
-        )
+            )
+                """,
+            ]
+        else:
+            schema = [
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(30) NOT NULL UNIQUE,
+                    password_hash VARCHAR(128) NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS posts (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id VARCHAR(128) PRIMARY KEY,
+                    csrf_token VARCHAR(128) NOT NULL,
+                    user_id INT,
+                    expires_at BIGINT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """,
+            ]
+
+        for statement in schema:
+            db.execute(statement)
         db.commit()
 
 
@@ -353,7 +442,7 @@ class ForumHandler(BaseHTTPRequestHandler):
                 f"""<article class="post">
                     <div class="post-meta">
                         <span class="post-author">Skrivet av <strong>{escape(post["username"])}</strong></span>
-                        <time>{escape(post["created_at"])}</time>
+                        <time>{escape(str(post["created_at"]))}</time>
                     </div>
                     <p>{escape(post["body"])}</p>
                 </article>"""
@@ -396,6 +485,10 @@ class ForumHandler(BaseHTTPRequestHandler):
 
 def main():
     init_db()
+    if DB_BACKEND == "mysql":
+        print(f"Databas: MySQL/MariaDB {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    else:
+        print(f"Databas: SQLite {DB_PATH}")
     port = int(os.environ.get("PORT", "8000"))
     server = ThreadingHTTPServer(("127.0.0.1", port), ForumHandler)
     print(f"Fårforum körs på http://127.0.0.1:{port}")
