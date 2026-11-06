@@ -13,13 +13,13 @@ from urllib.parse import parse_qs
 from html import escape
 
 
-# Set these values to match your XAMPP MySQL/MariaDB settings.
+
 DB_BACKEND = os.environ.get("FORUM_DB_BACKEND", "mysql").lower()
 DB_HOST = "localhost"  # Enter the MySQL host shown in your XAMPP settings.
 DB_PORT = 3306  # Enter the MySQL port shown in your XAMPP settings.
 DB_USER = "root"  # Enter the MySQL username you want the forum to use.
 DB_PASSWORD = ""  # Enter that MySQL user's password; XAMPP may use a blank password.
-DB_NAME = "farforum"  # Create this database in phpMyAdmin before starting the forum.
+DB_NAME = "farforum"
 PASSWORD_ITERATIONS = 310_000
 SESSION_LIFETIME = 60 * 60 * 24 * 7
 MAX_REQUEST_SIZE = 12_000
