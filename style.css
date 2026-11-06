@@ -52,6 +52,39 @@ h2 {
     background: #fff;
 }
 
+.comments {
+    margin-top: 1rem;
+    border-top: 1px solid #e4e9e1;
+    padding-top: 0.8rem;
+}
+
+.comments summary {
+    color: #315d3b;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.comments-content {
+    padding-top: 0.5rem;
+}
+
+.comment {
+    margin: 0.75rem 0;
+    padding: 0.8rem;
+    border-left: 3px solid #dce4d9;
+    background: #f8faf6;
+}
+
+.comment p {
+    margin-bottom: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.comment-form {
+    margin-top: 1rem;
+}
+
 label {
     display: block;
     margin: 0.8rem 0 0.35rem;

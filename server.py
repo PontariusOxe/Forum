@@ -110,6 +110,15 @@ def init_db(database_path=None):
                 expires_at INTEGER NOT NULL
             )
                 """,
+            """
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
             ]
         else:
             schema = [
@@ -137,6 +146,17 @@ def init_db(database_path=None):
                     user_id INT,
                     expires_at BIGINT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS comments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    post_id INT NOT NULL,
+                    user_id INT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """,
             ]
@@ -257,13 +277,21 @@ class ForumHandler(BaseHTTPRequestHandler):
 
             if self.path == "/":
                 posts = db.execute(
-                    "SELECT posts.body, posts.created_at, users.username "
+                    "SELECT posts.id, posts.body, posts.created_at, users.username "
                     "FROM posts JOIN users ON users.id = posts.user_id "
                     "ORDER BY posts.id DESC"
                 ).fetchall()
+                comments = db.execute(
+                    "SELECT comments.post_id, comments.body, comments.created_at, users.username "
+                    "FROM comments JOIN users ON users.id = comments.user_id "
+                    "ORDER BY comments.id"
+                ).fetchall()
+                comments_by_post = {}
+                for comment in comments:
+                    comments_by_post.setdefault(comment["post_id"], []).append(comment)
                 self._send(
                     HTTPStatus.OK,
-                    self._home_page(posts, user, csrf_token),
+                    self._home_page(posts, user, csrf_token, comments_by_post),
                     session_id,
                 )
             elif self.path == "/login":
@@ -316,6 +344,8 @@ class ForumHandler(BaseHTTPRequestHandler):
                 self._login(db, form, session_id)
             elif self.path == "/post":
                 self._create_post(db, form, user, session_id)
+            elif self.path == "/comment":
+                self._create_comment(db, form, user, session_id)
             elif self.path == "/logout":
                 db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
                 new_session, _ = create_session(db)
@@ -406,6 +436,50 @@ class ForumHandler(BaseHTTPRequestHandler):
         db.commit()
         self._redirect("/")
 
+    def _create_comment(self, db, form, user, session_id):
+        if user is None:
+            self._send(
+                HTTPStatus.UNAUTHORIZED,
+                page("Logga in", '<h1>Du behöver <a href="/login">logga in</a> för att kommentera.</h1>'),
+                session_id,
+            )
+            return
+
+        try:
+            post_id = int(form.get("post_id", [""])[0])
+        except ValueError:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Ogiltigt inlägg.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        body = form.get("body", [""])[0].strip()
+        if not body or len(body) > 2_000:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Kommentaren måste innehålla 1–2 000 tecken.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        post = db.execute("SELECT id FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if post is None:
+            self._send(
+                HTTPStatus.NOT_FOUND,
+                page("Fel", '<h1>Inlägget hittades inte.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        db.execute(
+            "INSERT INTO comments (post_id, user_id, body) VALUES (?, ?, ?)",
+            (post_id, user["id"], body),
+        )
+        db.commit()
+        self._redirect(f"/#post-{post_id}")
+
     @staticmethod
     def _csrf_for(db, session_id):
         row = db.execute(
@@ -413,7 +487,8 @@ class ForumHandler(BaseHTTPRequestHandler):
         ).fetchone()
         return row["csrf_token"]
 
-    def _home_page(self, posts, user, csrf_token):
+    def _home_page(self, posts, user, csrf_token, comments_by_post=None):
+        comments_by_post = comments_by_post or {}
         if user:
             composer = f"""
                 <section class="panel">
@@ -439,12 +514,13 @@ class ForumHandler(BaseHTTPRequestHandler):
 
         if posts:
             post_html = "".join(
-                f"""<article class="post">
+                f"""<article class="post" id="post-{post["id"]}">
                     <div class="post-meta">
                         <span class="post-author">Skrivet av <strong>{escape(post["username"])}</strong></span>
                         <time>{escape(str(post["created_at"]))}</time>
                     </div>
                     <p>{escape(post["body"])}</p>
+                    {self._comments_section(post, comments_by_post.get(post["id"], []), user, csrf_token)}
                 </article>"""
                 for post in posts
             )
@@ -460,6 +536,41 @@ class ForumHandler(BaseHTTPRequestHandler):
                 {post_html}
             </section>""",
         )
+
+    @staticmethod
+    def _comments_section(post, comments, user, csrf_token):
+        comment_html = "".join(
+            f"""<article class="comment">
+                <div class="post-meta">
+                    <span>Skrivet av <strong>{escape(comment["username"])}</strong></span>
+                    <time>{escape(str(comment["created_at"]))}</time>
+                </div>
+                <p>{escape(comment["body"])}</p>
+            </article>"""
+            for comment in comments
+        )
+        if user:
+            comment_form = f"""
+                <form action="/comment" method="post" class="comment-form">
+                    <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+                    <input type="hidden" name="post_id" value="{post["id"]}">
+                    <label for="comment-body-{post["id"]}">Skriv en kommentar</label>
+                    <textarea id="comment-body-{post["id"]}" name="body" maxlength="2000" required></textarea>
+                    <button type="submit">Kommentera</button>
+                </form>"""
+        else:
+            comment_form = '<p><a href="/login">Logga in</a> för att kommentera.</p>'
+
+        if not comment_html:
+            comment_html = '<p class="empty">Inga kommentarer ännu.</p>'
+
+        return f"""<details class="comments">
+            <summary>Visa kommentarer ({len(comments)})</summary>
+            <div class="comments-content">
+                {comment_html}
+                {comment_form}
+            </div>
+        </details>"""
 
     def _auth_page(self, title, action, csrf_token, kind, error=None):
         error_html = f'<p class="error">{escape(error)}</p>' if error else ""

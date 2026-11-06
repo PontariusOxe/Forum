@@ -37,6 +37,7 @@ Då skapas `forum.db` bredvid `server.py`. SQLite- och MySQL-databaserna är sep
 
 - Skapa konto och logga in.
 - Skriva inlägg när du är inloggad.
+- Kommentera inlägg och visa eller dölja kommentarerna.
 - Läsa inlägg med tydlig författare och tidpunkt.
 
 Lösenord lagras som PBKDF2-hashar, och text från användare HTML-escapas innan den visas.
