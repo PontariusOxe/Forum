@@ -22,22 +22,14 @@ python server.py
 
 Anslutningsuppgifterna står samlade nära början av `server.py`.
 
-### SQLite som alternativ
-
-Om XAMPP inte är igång kan du tillfälligt välja SQLite i PowerShell:
-
-```powershell
-$env:FORUM_DB_BACKEND = "sqlite"
-python server.py
-```
-
-Då skapas `forum.db` bredvid `server.py`. SQLite- och MySQL-databaserna är separata; befintliga SQLite-inlägg kopieras inte automatiskt.
-
 ## Funktioner
 
 - Skapa konto och logga in.
 - Skriva inlägg när du är inloggad.
 - Kommentera inlägg och visa eller dölja kommentarerna.
 - Läsa inlägg med tydlig författare och tidpunkt.
+- Ladda upp en egen profilbild som visas vid användarens inlägg och kommentarer.
+
+Profilbilder sparas per användare i MySQL. Tillåtna format är PNG, JPEG, GIF och WebP; maximal storlek är 2 MB. Tabellen skapas automatiskt när forumet startas.
 
 Lösenord lagras som PBKDF2-hashar, och text från användare HTML-escapas innan den visas.

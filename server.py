@@ -2,45 +2,39 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
 import time
 from contextlib import closing
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
 from html import escape
+from urllib.parse import parse_qs
 
 
 
-DB_BACKEND = os.environ.get("FORUM_DB_BACKEND", "mysql").lower()
-DB_HOST = "localhost"  # Enter the MySQL host shown in your XAMPP settings.
-DB_PORT = 3306  # Enter the MySQL port shown in your XAMPP settings.
-DB_USER = "root"  # Enter the MySQL username you want the forum to use.
-DB_PASSWORD = ""  # Enter that MySQL user's password; XAMPP may use a blank password.
+DB_HOST = "localhost"
+DB_PORT = 3306
+DB_USER = "root"
+DB_PASSWORD = ""
 DB_NAME = "farforum"
 PASSWORD_ITERATIONS = 310_000
 SESSION_LIFETIME = 60 * 60 * 24 * 7
 MAX_REQUEST_SIZE = 12_000
+MAX_PROFILE_IMAGE_SIZE = 2 * 1024 * 1024
+MAX_PROFILE_UPLOAD_SIZE = MAX_PROFILE_IMAGE_SIZE + 16_000
 
 
 class DatabaseConnection:
-    def __init__(self, connection, backend, integrity_error=None):
+    def __init__(self, connection, integrity_error):
         self.connection = connection
-        self.backend = backend
         self.integrity_error = integrity_error
 
     def execute(self, query, parameters=()):
-        if self.backend == "sqlite":
-            return self.connection.execute(query, parameters)
-
         cursor = self.connection.cursor(dictionary=True)
-        try:
-            cursor.execute(query.replace("?", "%s"), parameters)
-        except self.integrity_error as error:
-            cursor.close()
-            raise sqlite3.IntegrityError(str(error)) from error
+        cursor.execute(query.replace("?", "%s"), parameters)
         return cursor
 
     def commit(self):
@@ -50,18 +44,7 @@ class DatabaseConnection:
         self.connection.close()
 
 
-def connect_db(database_path=None):
-    if database_path is not None or DB_BACKEND == "sqlite":
-        connection = sqlite3.connect(database_path or DB_PATH)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return DatabaseConnection(connection, "sqlite")
-
-    if DB_BACKEND != "mysql":
-        raise ValueError(
-            "FORUM_DB_BACKEND must be either 'mysql' or 'sqlite'."
-        )
-
+def connect_db():
     try:
         import mysql.connector
         from mysql.connector.errors import IntegrityError
@@ -79,49 +62,12 @@ def connect_db(database_path=None):
         database=DB_NAME,
         charset="utf8mb4",
     )
-    return DatabaseConnection(connection, "mysql", IntegrityError)
+    return DatabaseConnection(connection, IntegrityError)
 
 
-def init_db(database_path=None):
-    with closing(connect_db(database_path)) as db:
-        if db.backend == "sqlite":
-            schema = [
-                """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-                """,
-                """
-            CREATE TABLE IF NOT EXISTS posts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL REFERENCES users(id),
-                body TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-                """,
-                """
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY,
-                csrf_token TEXT NOT NULL,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                expires_at INTEGER NOT NULL
-            )
-                """,
-            """
-            CREATE TABLE IF NOT EXISTS comments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
-                user_id INTEGER NOT NULL REFERENCES users(id),
-                body TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """,
-            ]
-        else:
-            schema = [
+def init_db():
+    with closing(connect_db()) as db:
+        schema = [
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -159,11 +105,60 @@ def init_db(database_path=None):
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """,
-            ]
+                """
+                CREATE TABLE IF NOT EXISTS profile_pictures (
+                    user_id INT PRIMARY KEY,
+                    image_type VARCHAR(30) NOT NULL,
+                    image_data MEDIUMBLOB NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """,
+        ]
 
         for statement in schema:
             db.execute(statement)
         db.commit()
+
+
+def parse_profile_upload(content_type, body):
+    try:
+        headers = (
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii")
+        )
+    except UnicodeEncodeError as error:
+        raise ValueError("Invalid multipart content type.") from error
+
+    message = BytesParser(policy=email_policy).parsebytes(headers + body)
+    if not message.is_multipart():
+        raise ValueError("Expected multipart form data.")
+
+    fields = {}
+    image = None
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        name = part.get_param("name", header="content-disposition")
+        if name == "profile_picture":
+            image = (part.get_content_type(), part.get_payload(decode=True) or b"")
+        elif name:
+            value = (part.get_payload(decode=True) or b"").decode(
+                part.get_content_charset() or "utf-8", errors="replace"
+            )
+            fields.setdefault(name, []).append(value)
+
+    return fields, image
+
+
+def detect_profile_image_type(image_data):
+    if image_data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(image_data) >= 12 and image_data[:4] == b"RIFF" and image_data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def hash_password(password, salt=None):
@@ -234,7 +229,11 @@ class ForumHandler(BaseHTTPRequestHandler):
         user = None
         if row["user_id"] is not None:
             user = db.execute(
-                "SELECT id, username FROM users WHERE id = ?", (row["user_id"],)
+                "SELECT users.id, users.username, "
+                "profile_pictures.user_id IS NOT NULL AS has_profile_picture "
+                "FROM users LEFT JOIN profile_pictures "
+                "ON profile_pictures.user_id = users.id WHERE users.id = ?",
+                (row["user_id"],),
             ).fetchone()
         return row["csrf_token"], user, session_id
 
@@ -249,10 +248,12 @@ class ForumHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'")
+        if content_type.startswith("image/"):
+            self.send_header("Cache-Control", "private, no-store")
         if session_id is not None:
             self._set_session_cookie(session_id)
         self.end_headers()
-        self.wfile.write(body.encode("utf-8"))
+        self.wfile.write(body.encode("utf-8") if isinstance(body, str) else body)
 
     def _redirect(self, location, session_id=None):
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -272,18 +273,51 @@ class ForumHandler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.OK, css, content_type="text/css; charset=utf-8")
             return
 
+        if self.path.startswith("/profile-picture/"):
+            try:
+                user_id = int(self.path[len("/profile-picture/"):])
+            except ValueError:
+                self._send(
+                    HTTPStatus.NOT_FOUND,
+                    page("Sidan hittades inte", "<h1>Profilbilden hittades inte</h1>"),
+                )
+                return
+            with closing(connect_db()) as db:
+                picture = db.execute(
+                    "SELECT image_type, image_data FROM profile_pictures WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+            if picture is None:
+                self._send(
+                    HTTPStatus.NOT_FOUND,
+                    page("Sidan hittades inte", "<h1>Profilbilden hittades inte</h1>"),
+                )
+            else:
+                self._send(
+                    HTTPStatus.OK,
+                    picture["image_data"],
+                    content_type=picture["image_type"],
+                )
+            return
+
         with closing(connect_db()) as db:
             csrf_token, user, session_id = self._session(db)
 
             if self.path == "/":
                 posts = db.execute(
-                    "SELECT posts.id, posts.body, posts.created_at, users.username "
+                    "SELECT posts.id, posts.user_id, posts.body, posts.created_at, "
+                    "users.username, profile_pictures.user_id IS NOT NULL "
+                    "AS has_profile_picture "
                     "FROM posts JOIN users ON users.id = posts.user_id "
+                    "LEFT JOIN profile_pictures ON profile_pictures.user_id = users.id "
                     "ORDER BY posts.id DESC"
                 ).fetchall()
                 comments = db.execute(
-                    "SELECT comments.post_id, comments.body, comments.created_at, users.username "
+                    "SELECT comments.post_id, comments.user_id, comments.body, "
+                    "comments.created_at, users.username, "
+                    "profile_pictures.user_id IS NOT NULL AS has_profile_picture "
                     "FROM comments JOIN users ON users.id = comments.user_id "
+                    "LEFT JOIN profile_pictures ON profile_pictures.user_id = users.id "
                     "ORDER BY comments.id"
                 ).fetchall()
                 comments_by_post = {}
@@ -314,19 +348,40 @@ class ForumHandler(BaseHTTPRequestHandler):
                 )
 
     def do_POST(self):
+        is_profile_upload = self.path == "/profile-picture"
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             self._send(HTTPStatus.BAD_REQUEST, page("Fel", "<h1>Felaktig förfrågan</h1>"))
             return
-        if content_length < 0 or content_length > MAX_REQUEST_SIZE:
+        max_request_size = MAX_PROFILE_UPLOAD_SIZE if is_profile_upload else MAX_REQUEST_SIZE
+        if content_length < 0 or content_length > max_request_size:
             self._send(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, page("Fel", "<h1>Formuläret är för stort</h1>"))
             return
 
-        form = parse_qs(
-            self.rfile.read(content_length).decode("utf-8", errors="replace"),
-            keep_blank_values=True,
-        )
+        request_body = self.rfile.read(content_length)
+        profile_image = None
+        if is_profile_upload:
+            content_type = self.headers.get("Content-Type", "")
+            if not content_type.lower().startswith("multipart/form-data;"):
+                self._send(
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                    page("Fel", "<h1>Välj en bild att ladda upp.</h1>"),
+                )
+                return
+            try:
+                form, profile_image = parse_profile_upload(content_type, request_body)
+            except ValueError:
+                self._send(
+                    HTTPStatus.BAD_REQUEST,
+                    page("Fel", "<h1>Formuläret för profilbilden är ogiltigt.</h1>"),
+                )
+                return
+        else:
+            form = parse_qs(
+                request_body.decode("utf-8", errors="replace"),
+                keep_blank_values=True,
+            )
         with closing(connect_db()) as db:
             csrf_token, user, session_id = self._session(db)
             submitted_csrf = form.get("csrf_token", [""])[0]
@@ -346,6 +401,8 @@ class ForumHandler(BaseHTTPRequestHandler):
                 self._create_post(db, form, user, session_id)
             elif self.path == "/comment":
                 self._create_comment(db, form, user, session_id)
+            elif is_profile_upload:
+                self._save_profile_picture(db, profile_image, user, session_id)
             elif self.path == "/logout":
                 db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
                 new_session, _ = create_session(db)
@@ -382,7 +439,7 @@ class ForumHandler(BaseHTTPRequestHandler):
                 "INSERT INTO users (username, password_hash) VALUES (?, ?)",
                 (username, hash_password(password)),
             )
-        except sqlite3.IntegrityError:
+        except db.integrity_error:
             self._send(
                 HTTPStatus.CONFLICT,
                 self._auth_page(
@@ -480,6 +537,52 @@ class ForumHandler(BaseHTTPRequestHandler):
         db.commit()
         self._redirect(f"/#post-{post_id}")
 
+    def _save_profile_picture(self, db, image, user, session_id):
+        if user is None:
+            self._send(
+                HTTPStatus.UNAUTHORIZED,
+                page("Logga in", '<h1>Du behöver <a href="/login">logga in</a> för att lägga till en profilbild.</h1>'),
+                session_id,
+            )
+            return
+        if image is None:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Välj en profilbild att ladda upp.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        declared_type, image_data = image
+        if not image_data or len(image_data) > MAX_PROFILE_IMAGE_SIZE:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Bilden måste vara mindre än 2 MB.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        image_type = detect_profile_image_type(image_data)
+        declared_type = declared_type.lower()
+        if declared_type == "image/jpg":
+            declared_type = "image/jpeg"
+        if image_type is None or declared_type != image_type:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Välj en giltig PNG-, JPEG-, GIF- eller WebP-bild.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        db.execute(
+            "INSERT INTO profile_pictures (user_id, image_type, image_data) "
+            "VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE "
+            "image_type = VALUES(image_type), image_data = VALUES(image_data)",
+            (user["id"], image_type, image_data),
+        )
+        db.commit()
+        self._redirect("/")
+
     @staticmethod
     def _csrf_for(db, session_id):
         row = db.execute(
@@ -490,9 +593,18 @@ class ForumHandler(BaseHTTPRequestHandler):
     def _home_page(self, posts, user, csrf_token, comments_by_post=None):
         comments_by_post = comments_by_post or {}
         if user:
+            account_avatar = self._avatar(
+                user["id"], user["has_profile_picture"], user["username"]
+            )
             composer = f"""
                 <section class="panel">
-                    <p>Inloggad som <strong>{escape(user["username"])}</strong></p>
+                    <p class="account-identity">{account_avatar} Inloggad som <strong>{escape(user["username"])}</strong></p>
+                    <form action="/profile-picture" method="post" enctype="multipart/form-data">
+                        <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+                        <label for="profile_picture">Profilbild (PNG, JPEG, GIF eller WebP; max 2 MB)</label>
+                        <input id="profile_picture" name="profile_picture" type="file" accept="image/png,image/jpeg,image/gif,image/webp" required>
+                        <button type="submit">Spara profilbild</button>
+                    </form>
                     <form action="/post" method="post">
                         <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
                         <label for="body">Skriv ett inlägg</label>
@@ -516,7 +628,7 @@ class ForumHandler(BaseHTTPRequestHandler):
             post_html = "".join(
                 f"""<article class="post" id="post-{post["id"]}">
                     <div class="post-meta">
-                        <span class="post-author">Skrivet av <strong>{escape(post["username"])}</strong></span>
+                        <span class="post-author">{self._avatar(post["user_id"], post["has_profile_picture"], post["username"])} Skrivet av <strong>{escape(post["username"])}</strong></span>
                         <time>{escape(str(post["created_at"]))}</time>
                     </div>
                     <p>{escape(post["body"])}</p>
@@ -538,11 +650,20 @@ class ForumHandler(BaseHTTPRequestHandler):
         )
 
     @staticmethod
+    def _avatar(user_id, has_profile_picture, username):
+        if not has_profile_picture:
+            return ""
+        return (
+            f'<img class="avatar" src="/profile-picture/{int(user_id)}" '
+            f'alt="Profilbild för {escape(username)}">'
+        )
+
+    @staticmethod
     def _comments_section(post, comments, user, csrf_token):
         comment_html = "".join(
             f"""<article class="comment">
                 <div class="post-meta">
-                    <span>Skrivet av <strong>{escape(comment["username"])}</strong></span>
+                    <span class="comment-author">{ForumHandler._avatar(comment["user_id"], comment["has_profile_picture"], comment["username"])} Skrivet av <strong>{escape(comment["username"])}</strong></span>
                     <time>{escape(str(comment["created_at"]))}</time>
                 </div>
                 <p>{escape(comment["body"])}</p>
@@ -596,10 +717,7 @@ class ForumHandler(BaseHTTPRequestHandler):
 
 def main():
     init_db()
-    if DB_BACKEND == "mysql":
-        print(f"Databas: MySQL/MariaDB {DB_HOST}:{DB_PORT}/{DB_NAME}")
-    else:
-        print(f"Databas: SQLite {DB_PATH}")
+    print(f"Databas: MySQL/MariaDB {DB_HOST}:{DB_PORT}/{DB_NAME}")
     port = int(os.environ.get("PORT", "8000"))
     server = ThreadingHTTPServer(("127.0.0.1", port), ForumHandler)
     print(f"Fårforum körs på http://127.0.0.1:{port}")
