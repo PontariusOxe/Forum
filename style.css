@@ -75,6 +75,39 @@ h2 {
     background: #f8faf6;
 }
 
+.replies {
+    margin: 0.8rem 0 0 1rem;
+    padding-left: 0.8rem;
+    border-left: 2px solid #dce4d9;
+}
+
+.comment-reply {
+    margin: 0.75rem 0;
+    padding: 0.75rem;
+    border-radius: 6px;
+    background: #fff;
+}
+
+.comment-reply p {
+    margin-bottom: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.reply-form {
+    margin-top: 0.75rem;
+}
+
+.reply-composer {
+    margin-top: 0.75rem;
+}
+
+.reply-composer summary {
+    color: #315d3b;
+    font-weight: 600;
+    cursor: pointer;
+}
+
 .comment p {
     margin-bottom: 0;
     white-space: pre-wrap;

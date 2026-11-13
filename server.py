@@ -106,6 +106,17 @@ def init_db():
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """,
                 """
+                CREATE TABLE IF NOT EXISTS comment_replies (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    comment_id INT NOT NULL,
+                    user_id INT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (comment_id) REFERENCES comments(id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """,
+                """
                 CREATE TABLE IF NOT EXISTS profile_pictures (
                     user_id INT PRIMARY KEY,
                     image_type VARCHAR(30) NOT NULL,
@@ -313,7 +324,7 @@ class ForumHandler(BaseHTTPRequestHandler):
                     "ORDER BY posts.id DESC"
                 ).fetchall()
                 comments = db.execute(
-                    "SELECT comments.post_id, comments.user_id, comments.body, "
+                    "SELECT comments.id, comments.post_id, comments.user_id, comments.body, "
                     "comments.created_at, users.username, "
                     "profile_pictures.user_id IS NOT NULL AS has_profile_picture "
                     "FROM comments JOIN users ON users.id = comments.user_id "
@@ -323,9 +334,24 @@ class ForumHandler(BaseHTTPRequestHandler):
                 comments_by_post = {}
                 for comment in comments:
                     comments_by_post.setdefault(comment["post_id"], []).append(comment)
+                replies = db.execute(
+                    "SELECT comment_replies.id, comment_replies.comment_id, "
+                    "comment_replies.user_id, comment_replies.body, "
+                    "comment_replies.created_at, users.username, "
+                    "profile_pictures.user_id IS NOT NULL AS has_profile_picture "
+                    "FROM comment_replies "
+                    "JOIN users ON users.id = comment_replies.user_id "
+                    "LEFT JOIN profile_pictures ON profile_pictures.user_id = users.id "
+                    "ORDER BY comment_replies.id"
+                ).fetchall()
+                replies_by_comment = {}
+                for reply in replies:
+                    replies_by_comment.setdefault(reply["comment_id"], []).append(reply)
                 self._send(
                     HTTPStatus.OK,
-                    self._home_page(posts, user, csrf_token, comments_by_post),
+                    self._home_page(
+                        posts, user, csrf_token, comments_by_post, replies_by_comment
+                    ),
                     session_id,
                 )
             elif self.path == "/login":
@@ -401,6 +427,8 @@ class ForumHandler(BaseHTTPRequestHandler):
                 self._create_post(db, form, user, session_id)
             elif self.path == "/comment":
                 self._create_comment(db, form, user, session_id)
+            elif self.path == "/reply":
+                self._create_reply(db, form, user, session_id)
             elif is_profile_upload:
                 self._save_profile_picture(db, profile_image, user, session_id)
             elif self.path == "/logout":
@@ -537,6 +565,59 @@ class ForumHandler(BaseHTTPRequestHandler):
         db.commit()
         self._redirect(f"/#post-{post_id}")
 
+    def _create_reply(self, db, form, user, session_id):
+        if user is None:
+            self._send(
+                HTTPStatus.UNAUTHORIZED,
+                page("Logga in", '<h1>Du behöver <a href="/login">logga in</a> för att svara.</h1>'),
+                session_id,
+            )
+            return
+
+        try:
+            comment_id = int(form.get("comment_id", [""])[0])
+        except ValueError:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Ogiltig kommentar.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+        if comment_id < 1:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Ogiltig kommentar.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        body = form.get("body", [""])[0].strip()
+        if not body or len(body) > 2_000:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                page("Fel", '<h1>Svaret måste innehålla 1–2 000 tecken.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        comment = db.execute(
+            "SELECT id FROM comments WHERE id = ?", (comment_id,)
+        ).fetchone()
+        if comment is None:
+            self._send(
+                HTTPStatus.NOT_FOUND,
+                page("Fel", '<h1>Kommentaren hittades inte.</h1><p><a href="/">Till forumet</a></p>'),
+                session_id,
+            )
+            return
+
+        db.execute(
+            "INSERT INTO comment_replies (comment_id, user_id, body) VALUES (?, ?, ?)",
+            (comment_id, user["id"], body),
+        )
+        db.commit()
+        self._redirect(f"/#comment-{comment_id}")
+
     def _save_profile_picture(self, db, image, user, session_id):
         if user is None:
             self._send(
@@ -590,8 +671,11 @@ class ForumHandler(BaseHTTPRequestHandler):
         ).fetchone()
         return row["csrf_token"]
 
-    def _home_page(self, posts, user, csrf_token, comments_by_post=None):
+    def _home_page(
+        self, posts, user, csrf_token, comments_by_post=None, replies_by_comment=None
+    ):
         comments_by_post = comments_by_post or {}
+        replies_by_comment = replies_by_comment or {}
         if user:
             account_avatar = self._avatar(
                 user["id"], user["has_profile_picture"], user["username"]
@@ -632,7 +716,7 @@ class ForumHandler(BaseHTTPRequestHandler):
                         <time>{escape(str(post["created_at"]))}</time>
                     </div>
                     <p>{escape(post["body"])}</p>
-                    {self._comments_section(post, comments_by_post.get(post["id"], []), user, csrf_token)}
+                    {self._comments_section(post, comments_by_post.get(post["id"], []), user, csrf_token, replies_by_comment)}
                 </article>"""
                 for post in posts
             )
@@ -659,14 +743,16 @@ class ForumHandler(BaseHTTPRequestHandler):
         )
 
     @staticmethod
-    def _comments_section(post, comments, user, csrf_token):
+    def _comments_section(post, comments, user, csrf_token, replies_by_comment=None):
+        replies_by_comment = replies_by_comment or {}
         comment_html = "".join(
-            f"""<article class="comment">
+            f"""<article class="comment" id="comment-{comment["id"]}">
                 <div class="post-meta">
                     <span class="comment-author">{ForumHandler._avatar(comment["user_id"], comment["has_profile_picture"], comment["username"])} Skrivet av <strong>{escape(comment["username"])}</strong></span>
                     <time>{escape(str(comment["created_at"]))}</time>
                 </div>
                 <p>{escape(comment["body"])}</p>
+                {ForumHandler._replies_section(comment, replies_by_comment.get(comment["id"], []), user, csrf_token)}
             </article>"""
             for comment in comments
         )
@@ -692,6 +778,34 @@ class ForumHandler(BaseHTTPRequestHandler):
                 {comment_form}
             </div>
         </details>"""
+
+    @staticmethod
+    def _replies_section(comment, replies, user, csrf_token):
+        reply_html = "".join(
+            f"""<article class="comment-reply" id="reply-{reply["id"]}">
+                <div class="post-meta">
+                    <span class="comment-author">{ForumHandler._avatar(reply["user_id"], reply["has_profile_picture"], reply["username"])} Svar från <strong>{escape(reply["username"])}</strong></span>
+                    <time>{escape(str(reply["created_at"]))}</time>
+                </div>
+                <p>{escape(reply["body"])}</p>
+            </article>"""
+            for reply in replies
+        )
+        if user:
+            reply_form = f"""
+                <details class="reply-composer">
+                    <summary>Svara på kommentaren</summary>
+                <form action="/reply" method="post" class="reply-form">
+                    <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+                    <input type="hidden" name="comment_id" value="{comment["id"]}">
+                    <label for="reply-body-{comment["id"]}">Ditt svar</label>
+                    <textarea id="reply-body-{comment["id"]}" name="body" maxlength="2000" required></textarea>
+                    <button class="secondary" type="submit">Skicka svar</button>
+                </form>
+                </details>"""
+        else:
+            reply_form = '<p><a href="/login">Logga in</a> för att svara.</p>'
+        return f'<div class="replies">{reply_html}{reply_form}</div>'
 
     def _auth_page(self, title, action, csrf_token, kind, error=None):
         error_html = f'<p class="error">{escape(error)}</p>' if error else ""

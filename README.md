@@ -27,6 +27,8 @@ Anslutningsuppgifterna står samlade nära början av `server.py`.
 - Skapa konto och logga in.
 - Skriva inlägg när du är inloggad.
 - Kommentera inlägg och visa eller dölja kommentarerna.
+- Svara på enskilda kommentarer.
+- Visa eller dölja svarsfältet för en kommentar.
 - Läsa inlägg med tydlig författare och tidpunkt.
 - Ladda upp en egen profilbild som visas vid användarens inlägg och kommentarer.
 
